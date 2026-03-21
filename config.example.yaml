@@ -1,0 +1,31 @@
+# AlphaESS Modbus Controller Configuration
+
+inverter:
+  host: 192.168.1.51
+  port: 502
+  slave_id: 85  # 0x55
+  poll_interval: 5  # seconds
+
+homeassistant:
+  url: http://192.168.1.83:8123
+  token: YOUR_LONG_LIVED_TOKEN_HERE
+
+server:
+  host: 0.0.0.0
+  port: 8214
+
+# Sensor entities pushed to HA via REST API
+sensors:
+  battery_soc: sensor.alphaess_battery_soc
+  battery_power: sensor.alphaess_battery_power
+  pv1_power: sensor.alphaess_pv1_power
+  pv2_power: sensor.alphaess_pv2_power
+  pv_power: sensor.alphaess_pv_power
+  grid_power: sensor.alphaess_grid_power
+  load_power: sensor.alphaess_load_power
+  charge_energy: sensor.alphaess_battery_charge_energy
+  discharge_energy: sensor.alphaess_battery_discharge_energy
+  grid_import: sensor.alphaess_grid_import_total
+  grid_export: sensor.alphaess_grid_export_total
+  solar_total: sensor.alphaess_solar_production_total
+  dispatch_active: sensor.alphaess_dispatch_active
