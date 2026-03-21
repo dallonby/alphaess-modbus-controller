@@ -71,9 +71,13 @@ class InverterState:
     grid_export: float = 0
     solar_total: float = 0
     dispatch_active: bool = False
+    dispatch_charging: bool = False
+    dispatch_holding: bool = False
     dispatch_power_w: float = 0
     dispatch_soc_target: float = 0
     dispatch_time_remaining: float = 0
+    dispatch_started: float = 0
+    dispatch_duration: float = 0
     last_update: float = 0
     connected: bool = False
 
@@ -240,8 +244,11 @@ class InverterController:
 
         if ok:
             self.state.dispatch_active = True
+            self.state.dispatch_charging = charge
             self.state.dispatch_power_w = power_w if charge else -power_w
             self.state.dispatch_soc_target = target_soc
+            self.state.dispatch_duration = duration_s
+            self.state.dispatch_started = time.time()
             self.state.dispatch_time_remaining = duration_s
             log.info("Dispatch started successfully")
         else:
@@ -249,20 +256,62 @@ class InverterController:
 
         return ok
 
+    async def hold(self, duration_s: int = 21600) -> bool:
+        """Hold battery at current SOC. House runs from grid."""
+        current_soc = int(self.state.soc)
+        async with self._lock:
+            ok = await asyncio.get_event_loop().run_in_executor(
+                None, self._dispatch_sync, 5000, current_soc, duration_s, True
+            )
+            if ok:
+                self.state.dispatch_holding = True
+            return ok
+
     async def stop_dispatch(self) -> bool:
         """Stop dispatch mode, return to normal."""
         async with self._lock:
             return await asyncio.get_event_loop().run_in_executor(None, self._stop_sync)
 
-    def _stop_sync(self) -> bool:
+    def _stop_sync(self, reason: str = "manual") -> bool:
         if not self._connect():
             return False
         ok = self._write_registers(0x0880, [0])
         if ok:
             self.state.dispatch_active = False
+            self.state.dispatch_charging = False
+            self.state.dispatch_holding = False
             self.state.dispatch_power_w = 0
-            log.info("Dispatch stopped")
+            log.info("Dispatch stopped (%s)", reason)
         return ok
+
+    def check_soc_target(self):
+        """Auto-stop dispatch if SOC target reached. Called every poll cycle."""
+        if not self.state.dispatch_active:
+            return
+
+        if self.state.dispatch_holding:
+            return
+
+        soc = self.state.soc
+        target = self.state.dispatch_soc_target
+
+        if target <= 0:
+            return
+
+        # Update time remaining
+        if self.state.dispatch_started > 0:
+            elapsed = time.time() - self.state.dispatch_started
+            self.state.dispatch_time_remaining = max(0, self.state.dispatch_duration - elapsed)
+
+        # Charging: stop when SOC >= target
+        if self.state.dispatch_charging and soc >= target:
+            log.info("SOC %.1f%% reached target %d%% — stopping dispatch", soc, target)
+            self._stop_sync(reason=f"SOC target {target}% reached")
+
+        # Discharging: stop when SOC <= target
+        if not self.state.dispatch_charging and soc <= target:
+            log.info("SOC %.1f%% reached discharge floor %d%% — stopping dispatch", soc, target)
+            self._stop_sync(reason=f"SOC floor {target}% reached")
 
 
 # ---------------------------------------------------------------------------
@@ -340,6 +389,7 @@ class APIServer:
         self.app.router.add_get("/health", self.handle_health)
         self.app.router.add_post("/charge", self.handle_charge)
         self.app.router.add_post("/discharge", self.handle_discharge)
+        self.app.router.add_post("/hold", self.handle_hold)
         self.app.router.add_post("/stop", self.handle_stop)
 
     async def handle_status(self, request):
@@ -351,8 +401,11 @@ class APIServer:
             "grid_power": s.grid_power,
             "load_power": s.load_power,
             "dispatch_active": s.dispatch_active,
+            "dispatch_charging": s.dispatch_charging,
+            "dispatch_holding": s.dispatch_holding,
             "dispatch_power_w": s.dispatch_power_w,
             "dispatch_soc_target": s.dispatch_soc_target,
+            "dispatch_time_remaining": s.dispatch_time_remaining,
             "connected": s.connected,
             "last_update": s.last_update,
         })
@@ -403,6 +456,19 @@ class APIServer:
         except Exception as e:
             return web.json_response({"ok": False, "error": str(e)}, status=400)
 
+    async def handle_hold(self, request):
+        try:
+            data = await request.json() if request.content_length else {}
+            duration_s = int(data.get("duration_s", 21600))
+            duration_s = max(60, min(86400, duration_s))
+            ok = await self.controller.hold(duration_s)
+            return web.json_response(
+                {"ok": ok, "soc": self.controller.state.soc, "duration_s": duration_s},
+                status=200 if ok else 500,
+            )
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+
     async def handle_stop(self, request):
         ok = await self.controller.stop_dispatch()
         return web.json_response({"ok": ok}, status=200 if ok else 500)
@@ -418,6 +484,8 @@ async def poll_loop(controller: InverterController, pusher: HAPusher, interval: 
         try:
             state = await controller.poll()
             if state.connected:
+                # Check if dispatch should auto-stop based on SOC
+                controller.check_soc_target()
                 await pusher.push(state)
         except Exception as e:
             log.error("Poll error: %s", e)
