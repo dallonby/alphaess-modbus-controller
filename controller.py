@@ -8,10 +8,8 @@ Uses dispatch mode (registers 0x0880-0x0887) with FC16 writes.
 import asyncio
 import json
 import logging
-import signal
-import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
@@ -26,23 +24,23 @@ log = logging.getLogger(__name__)
 
 REG = {
     # Read-only sensors
-    "soc": (0x0102, 1, "uint16", 0.1),           # Battery SOC %
-    "battery_power": (0x0126, 1, "int16", 1),     # Battery W (+discharge, -charge)
-    "pv1_power": (0x041F, 2, "uint32", 1),        # PV1 W
-    "pv2_power": (0x0423, 2, "uint32", 1),        # PV2 W
-    "grid_power": (0x0021, 2, "int32", 1),        # Grid W (+import, -export)
-    "load_power": (0x040C, 2, "int32", 1),        # Load W
-    "charge_energy": (0x0120, 2, "uint32", 0.1),  # Charge kWh lifetime
-    "discharge_energy": (0x0122, 2, "uint32", 0.1),  # Discharge kWh lifetime
-    "charge_from_grid": (0x0124, 2, "uint32", 0.1),  # Grid->battery kWh lifetime
-    "grid_import": (0x0010, 2, "uint32", 0.01),   # Grid import kWh lifetime
-    "grid_export": (0x0012, 2, "uint32", 0.01),   # Grid export kWh lifetime (note: might be wrong addr)
-    "solar_total": (0x043E, 2, "uint32", 0.1),    # Solar kWh lifetime
+    "soc": (0x0102, 1, "uint16", 0.1),
+    "battery_power": (0x0126, 1, "int16", 1),
+    "pv1_power": (0x041F, 2, "uint32", 1),
+    "pv2_power": (0x0423, 2, "uint32", 1),
+    "grid_power": (0x0021, 2, "int32", 1),
+    "load_power": (0x040C, 2, "int32", 1),
+    "charge_energy": (0x0120, 2, "uint32", 0.1),
+    "discharge_energy": (0x0122, 2, "uint32", 0.1),
+    "charge_from_grid": (0x0124, 2, "uint32", 0.1),
+    "grid_import": (0x0010, 2, "uint32", 0.01),
+    "grid_export": (0x0012, 2, "uint32", 0.01),
+    "solar_total": (0x043E, 2, "uint32", 0.1),
     # Dispatch registers
     "dispatch_start": (0x0880, 1, "uint16", 1),
-    "dispatch_power": (0x0881, 2, "int32", 1),    # 32000 offset
+    "dispatch_power": (0x0881, 2, "int32", 1),
     "dispatch_mode": (0x0885, 1, "uint16", 1),
-    "dispatch_soc": (0x0886, 1, "uint16", 1),     # /0.4 multiplier
+    "dispatch_soc": (0x0886, 1, "uint16", 1),
     "dispatch_time": (0x0887, 2, "uint32", 1),
 }
 
@@ -52,7 +50,7 @@ DISPATCH_MODE_SOC_CONTROL = 2
 
 
 # ---------------------------------------------------------------------------
-# Inverter connection
+# Inverter state
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -81,6 +79,10 @@ class InverterState:
     last_update: float = 0
     connected: bool = False
 
+
+# ---------------------------------------------------------------------------
+# Inverter controller
+# ---------------------------------------------------------------------------
 
 class InverterController:
     def __init__(self, host: str, port: int, slave_id: int):
@@ -133,16 +135,29 @@ class InverterController:
             self._close()
             return None
 
-    def _write_registers(self, addr: int, values: list[int]) -> bool:
-        """Write registers using FC16 (write multiple registers)."""
+    def _write_and_verify(self, addr: int, values: list[int]) -> bool:
+        """Write registers using FC16, then read back to confirm."""
         if self._client is None:
             return False
         try:
             result = self._client.write_registers(addr, values, device_id=self.slave_id)
-            if not result.isError():
-                return True
-            log.warning("Write 0x%04x failed: %s", addr, result)
-            return False
+            if result.isError():
+                log.warning("Write 0x%04x failed: %s", addr, result)
+                return False
+
+            # Read back and verify
+            time.sleep(0.1)
+            readback = self._client.read_holding_registers(addr, count=len(values), device_id=self.slave_id)
+            if readback.isError():
+                log.warning("Write 0x%04x: write OK but readback failed: %s", addr, readback)
+                return False
+
+            if list(readback.registers) != values:
+                log.warning("Write 0x%04x: VERIFICATION FAILED — wrote %s, read %s",
+                            addr, values, list(readback.registers))
+                return False
+
+            return True
         except Exception as e:
             log.warning("Write 0x%04x error: %s", addr, e)
             self._close()
@@ -157,8 +172,10 @@ class InverterController:
             self._client = None
             self.state.connected = False
 
+    # --- Poll (runs in executor, holds lock) ---
+
     async def poll(self) -> InverterState:
-        """Poll all sensors. Runs in executor to avoid blocking."""
+        """Poll all sensors and check SOC target. Runs in executor."""
         async with self._lock:
             return await asyncio.get_event_loop().run_in_executor(None, self._poll_sync)
 
@@ -169,7 +186,6 @@ class InverterController:
 
         self.state.connected = True
 
-        # Read power sensors
         for name in ["soc", "battery_power", "pv1_power", "pv2_power",
                       "grid_power", "load_power"]:
             addr, count, dtype, scale = REG[name]
@@ -179,7 +195,6 @@ class InverterController:
 
         self.state.pv_power = self.state.pv1_power + self.state.pv2_power
 
-        # Read energy counters (less frequently is fine but we do it anyway)
         for name in ["charge_energy", "discharge_energy", "charge_from_grid",
                       "grid_import", "grid_export", "solar_total"]:
             addr, count, dtype, scale = REG[name]
@@ -187,34 +202,85 @@ class InverterController:
             if val is not None:
                 setattr(self.state, name, val)
 
-        # Read dispatch state
+        # Read dispatch state from hardware (ground truth)
         addr, count, dtype, scale = REG["dispatch_start"]
         val = self._read_register(addr, count, dtype, scale)
         if val is not None:
-            self.state.dispatch_active = val == 1
+            hw_active = val == 1
+            if self.state.dispatch_active and not hw_active:
+                # Hardware ended dispatch (duration expired)
+                log.info("Dispatch ended by hardware (duration expired)")
+                self.state.dispatch_active = False
+                self.state.dispatch_charging = False
+                self.state.dispatch_holding = False
+                self.state.dispatch_power_w = 0
+            elif not self.state.dispatch_active and hw_active:
+                # Something else started dispatch (shouldn't happen)
+                log.warning("Dispatch active in hardware but not in controller state")
+                self.state.dispatch_active = True
+
+        # Update time remaining
+        if self.state.dispatch_active and self.state.dispatch_started > 0:
+            elapsed = time.time() - self.state.dispatch_started
+            self.state.dispatch_time_remaining = max(0, self.state.dispatch_duration - elapsed)
+
+        # Auto-stop check (inside lock, safe from races)
+        self._check_soc_target()
 
         self.state.last_update = time.time()
         return self.state
 
+    def _check_soc_target(self):
+        """Auto-stop dispatch if SOC target reached."""
+        if not self.state.dispatch_active or self.state.dispatch_holding:
+            return
+
+        soc = self.state.soc
+        target = self.state.dispatch_soc_target
+        if target <= 0:
+            return
+
+        if self.state.dispatch_charging and soc >= target:
+            log.info("SOC %.1f%% reached charge target %d%% — stopping", soc, target)
+            self._stop_sync(reason=f"SOC target {target}% reached")
+
+        if not self.state.dispatch_charging and soc <= target:
+            log.info("SOC %.1f%% reached discharge floor %d%% — stopping", soc, target)
+            self._stop_sync(reason=f"SOC floor {target}% reached")
+
+    # --- Dispatch control (all run in executor, all hold lock) ---
+
     async def start_charge(self, power_w: int, target_soc: int, duration_s: int) -> bool:
-        """Start grid charging via dispatch mode."""
         async with self._lock:
             return await asyncio.get_event_loop().run_in_executor(
                 None, self._dispatch_sync, power_w, target_soc, duration_s, True
             )
 
     async def start_discharge(self, power_w: int, target_soc: int, duration_s: int) -> bool:
-        """Start battery discharge via dispatch mode."""
         async with self._lock:
             return await asyncio.get_event_loop().run_in_executor(
                 None, self._dispatch_sync, power_w, target_soc, duration_s, False
             )
 
+    async def hold(self, duration_s: int = 21600) -> bool:
+        """Hold battery at current SOC. House runs from grid."""
+        async with self._lock:
+            current_soc = int(self.state.soc)
+            ok = await asyncio.get_event_loop().run_in_executor(
+                None, self._dispatch_sync, 5000, current_soc, duration_s, True
+            )
+            if ok:
+                self.state.dispatch_holding = True
+            return ok
+
+    async def stop_dispatch(self) -> bool:
+        async with self._lock:
+            return await asyncio.get_event_loop().run_in_executor(None, self._stop_sync)
+
     def _dispatch_sync(self, power_w: int, target_soc: int, duration_s: int, charge: bool) -> bool:
         if not self._connect():
             return False
 
-        # Calculate register values
         if charge:
             power_reg = DISPATCH_POWER_OFFSET - abs(power_w)
         else:
@@ -230,88 +296,47 @@ class InverterController:
                  "charge" if charge else "discharge", power_w, target_soc, duration_s,
                  power_reg, soc_reg)
 
-        # Write sequence with delays (matching Alpha2MQTT)
-        ok = True
-        ok = ok and self._write_registers(0x0880, [1])  # Dispatch on
-        time.sleep(0.5)
-        ok = ok and self._write_registers(0x0881, [power_high, power_low])  # Power
-        time.sleep(0.5)
-        ok = ok and self._write_registers(0x0887, [duration_high, duration_low])  # Duration
-        time.sleep(0.5)
-        ok = ok and self._write_registers(0x0886, [soc_reg])  # SOC target
-        time.sleep(0.5)
-        ok = ok and self._write_registers(0x0885, [DISPATCH_MODE_SOC_CONTROL])  # Mode
+        # Write sequence with verified readback
+        writes = [
+            (0x0880, [1], "dispatch_start"),
+            (0x0881, [power_high, power_low], "power"),
+            (0x0887, [duration_high, duration_low], "duration"),
+            (0x0886, [soc_reg], "soc_target"),
+            (0x0885, [DISPATCH_MODE_SOC_CONTROL], "mode"),
+        ]
 
-        if ok:
-            self.state.dispatch_active = True
-            self.state.dispatch_charging = charge
-            self.state.dispatch_power_w = power_w if charge else -power_w
-            self.state.dispatch_soc_target = target_soc
-            self.state.dispatch_duration = duration_s
-            self.state.dispatch_started = time.time()
-            self.state.dispatch_time_remaining = duration_s
-            log.info("Dispatch started successfully")
-        else:
-            log.error("Dispatch failed — some writes failed")
+        for addr, values, name in writes:
+            if not self._write_and_verify(addr, values):
+                log.error("Dispatch write %s (0x%04x) failed — rolling back", name, addr)
+                # Rollback: stop dispatch
+                self._write_and_verify(0x0880, [0])
+                return False
+            time.sleep(0.3)
 
-        return ok
-
-    async def hold(self, duration_s: int = 21600) -> bool:
-        """Hold battery at current SOC. House runs from grid."""
-        current_soc = int(self.state.soc)
-        async with self._lock:
-            ok = await asyncio.get_event_loop().run_in_executor(
-                None, self._dispatch_sync, 5000, current_soc, duration_s, True
-            )
-            if ok:
-                self.state.dispatch_holding = True
-            return ok
-
-    async def stop_dispatch(self) -> bool:
-        """Stop dispatch mode, return to normal."""
-        async with self._lock:
-            return await asyncio.get_event_loop().run_in_executor(None, self._stop_sync)
+        self.state.dispatch_active = True
+        self.state.dispatch_charging = charge
+        self.state.dispatch_holding = False
+        self.state.dispatch_power_w = power_w if charge else -power_w
+        self.state.dispatch_soc_target = target_soc
+        self.state.dispatch_duration = duration_s
+        self.state.dispatch_started = time.time()
+        self.state.dispatch_time_remaining = duration_s
+        log.info("Dispatch started (verified)")
+        return True
 
     def _stop_sync(self, reason: str = "manual") -> bool:
         if not self._connect():
             return False
-        ok = self._write_registers(0x0880, [0])
+        ok = self._write_and_verify(0x0880, [0])
         if ok:
             self.state.dispatch_active = False
             self.state.dispatch_charging = False
             self.state.dispatch_holding = False
             self.state.dispatch_power_w = 0
             log.info("Dispatch stopped (%s)", reason)
+        else:
+            log.error("Failed to stop dispatch!")
         return ok
-
-    def check_soc_target(self):
-        """Auto-stop dispatch if SOC target reached. Called every poll cycle."""
-        if not self.state.dispatch_active:
-            return
-
-        if self.state.dispatch_holding:
-            return
-
-        soc = self.state.soc
-        target = self.state.dispatch_soc_target
-
-        if target <= 0:
-            return
-
-        # Update time remaining
-        if self.state.dispatch_started > 0:
-            elapsed = time.time() - self.state.dispatch_started
-            self.state.dispatch_time_remaining = max(0, self.state.dispatch_duration - elapsed)
-
-        # Charging: stop when SOC >= target
-        if self.state.dispatch_charging and soc >= target:
-            log.info("SOC %.1f%% reached target %d%% — stopping dispatch", soc, target)
-            self._stop_sync(reason=f"SOC target {target}% reached")
-
-        # Discharging: stop when SOC <= target
-        if not self.state.dispatch_charging and soc <= target:
-            log.info("SOC %.1f%% reached discharge floor %d%% — stopping dispatch", soc, target)
-            self._stop_sync(reason=f"SOC floor {target}% reached")
 
 
 # ---------------------------------------------------------------------------
@@ -326,10 +351,16 @@ class HAPusher:
             "Content-Type": "application/json",
         }
         self.sensor_map = sensor_map
+        self._session = None
+
+    async def _get_session(self):
+        import aiohttp
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+        return self._session
 
     async def push(self, state: InverterState):
-        """Push all sensor states to HA via REST API."""
-        import aiohttp
+        session = await self._get_session()
 
         sensors = [
             (self.sensor_map.get("battery_soc"), state.soc, "%", "battery", "measurement"),
@@ -347,34 +378,39 @@ class HAPusher:
             (self.sensor_map.get("dispatch_active"), "on" if state.dispatch_active else "off", None, None, None),
         ]
 
-        async with aiohttp.ClientSession() as session:
-            for entity_id, value, uom, device_class, state_class in sensors:
-                if entity_id is None:
-                    continue
-                payload = {
-                    "state": value if isinstance(value, str) else round(value, 2),
-                    "attributes": {
-                        "friendly_name": entity_id.replace("sensor.", "").replace("_", " ").title(),
-                    },
-                }
-                if uom:
-                    payload["attributes"]["unit_of_measurement"] = uom
-                if device_class:
-                    payload["attributes"]["device_class"] = device_class
-                if state_class:
-                    payload["attributes"]["state_class"] = state_class
-                if entity_id == self.sensor_map.get("dispatch_active"):
-                    payload["attributes"]["power_w"] = state.dispatch_power_w
-                    payload["attributes"]["soc_target"] = state.dispatch_soc_target
-                    payload["attributes"]["icon"] = "mdi:battery-charging" if state.dispatch_active else "mdi:battery"
+        for entity_id, value, uom, device_class, state_class in sensors:
+            if entity_id is None:
+                continue
+            payload = {
+                "state": value if isinstance(value, str) else round(value, 2),
+                "attributes": {
+                    "friendly_name": entity_id.replace("sensor.", "").replace("_", " ").title(),
+                },
+            }
+            if uom:
+                payload["attributes"]["unit_of_measurement"] = uom
+            if device_class:
+                payload["attributes"]["device_class"] = device_class
+            if state_class:
+                payload["attributes"]["state_class"] = state_class
+            if entity_id == self.sensor_map.get("dispatch_active"):
+                payload["attributes"]["power_w"] = state.dispatch_power_w
+                payload["attributes"]["soc_target"] = state.dispatch_soc_target
+                payload["attributes"]["holding"] = state.dispatch_holding
+                payload["attributes"]["time_remaining"] = round(state.dispatch_time_remaining)
+                payload["attributes"]["icon"] = (
+                    "mdi:battery-lock" if state.dispatch_holding
+                    else "mdi:battery-charging" if state.dispatch_active
+                    else "mdi:battery"
+                )
 
-                try:
-                    url = f"{self.ha_url}/api/states/{entity_id}"
-                    async with session.post(url, json=payload, headers=self.headers, timeout=5) as resp:
-                        if resp.status not in (200, 201):
-                            log.warning("Push %s failed: %d", entity_id, resp.status)
-                except Exception as e:
-                    log.warning("Push %s error: %s", entity_id, e)
+            try:
+                url = f"{self.ha_url}/api/states/{entity_id}"
+                async with session.post(url, json=payload, headers=self.headers, timeout=5) as resp:
+                    if resp.status not in (200, 201):
+                        log.warning("Push %s failed: %d", entity_id, resp.status)
+            except Exception as e:
+                log.warning("Push %s error: %s", entity_id, e)
 
 
 # ---------------------------------------------------------------------------
@@ -421,13 +457,9 @@ class APIServer:
     async def handle_charge(self, request):
         try:
             data = await request.json()
-            power_w = int(data.get("power_w", 3000))
-            target_soc = int(data.get("target_soc", 95))
-            duration_s = int(data.get("duration_s", 21600))
-
-            power_w = max(500, min(8000, power_w))
-            target_soc = max(10, min(100, target_soc))
-            duration_s = max(60, min(86400, duration_s))
+            power_w = max(500, min(8000, int(data.get("power_w", 3000))))
+            target_soc = max(10, min(100, int(data.get("target_soc", 95))))
+            duration_s = max(60, min(86400, int(data.get("duration_s", 21600))))
 
             ok = await self.controller.start_charge(power_w, target_soc, duration_s)
             return web.json_response(
@@ -440,13 +472,9 @@ class APIServer:
     async def handle_discharge(self, request):
         try:
             data = await request.json()
-            power_w = int(data.get("power_w", 3000))
-            target_soc = int(data.get("target_soc", 10))
-            duration_s = int(data.get("duration_s", 21600))
-
-            power_w = max(500, min(8000, power_w))
-            target_soc = max(5, min(100, target_soc))
-            duration_s = max(60, min(86400, duration_s))
+            power_w = max(500, min(8000, int(data.get("power_w", 3000))))
+            target_soc = max(5, min(100, int(data.get("target_soc", 10))))
+            duration_s = max(60, min(86400, int(data.get("duration_s", 21600))))
 
             ok = await self.controller.start_discharge(power_w, target_soc, duration_s)
             return web.json_response(
@@ -459,8 +487,7 @@ class APIServer:
     async def handle_hold(self, request):
         try:
             data = await request.json() if request.content_length else {}
-            duration_s = int(data.get("duration_s", 21600))
-            duration_s = max(60, min(86400, duration_s))
+            duration_s = max(60, min(86400, int(data.get("duration_s", 21600))))
             ok = await self.controller.hold(duration_s)
             return web.json_response(
                 {"ok": ok, "soc": self.controller.state.soc, "duration_s": duration_s},
@@ -479,14 +506,11 @@ class APIServer:
 # ---------------------------------------------------------------------------
 
 async def poll_loop(controller: InverterController, pusher: HAPusher, interval: float):
-    """Poll inverter and push to HA on a fixed interval."""
     while True:
         try:
             state = await controller.poll()
-            if state.connected:
-                # Check if dispatch should auto-stop based on SOC
-                controller.check_soc_target()
-                await pusher.push(state)
+            # Always push (even if disconnected — pushes stale=False or last values)
+            await pusher.push(state)
         except Exception as e:
             log.error("Poll error: %s", e)
         await asyncio.sleep(interval)
@@ -515,19 +539,16 @@ async def main():
     pusher = HAPusher(ha["url"], ha["token"], config.get("sensors", {}))
     api = APIServer(controller)
 
-    # Start poll loop
     poll_task = asyncio.create_task(
         poll_loop(controller, pusher, inv.get("poll_interval", 5))
     )
 
-    # Start HTTP server
     runner = web.AppRunner(api.app)
     await runner.setup()
     site = web.TCPSite(runner, srv.get("host", "0.0.0.0"), srv.get("port", 8214))
     await site.start()
     log.info("API server listening on %s:%d", srv.get("host", "0.0.0.0"), srv.get("port", 8214))
 
-    # Wait forever
     try:
         await asyncio.Event().wait()
     except asyncio.CancelledError:
