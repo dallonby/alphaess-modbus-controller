@@ -250,13 +250,21 @@ class InverterController:
         if target <= 0:
             return
 
-        if self.state.dispatch_charging and soc >= target:
-            log.info("SOC %.1f%% reached charge target %d%% — stopping", soc, target)
-            self._stop_sync(reason=f"SOC target {target}% reached")
+        battery = self.state.battery_power
 
-        if not self.state.dispatch_charging and soc <= target:
-            log.info("SOC %.1f%% reached discharge floor %d%% — stopping", soc, target)
-            self._stop_sync(reason=f"SOC floor {target}% reached")
+        if self.state.dispatch_charging:
+            # Stop if SOC at/above target, OR if inverter has stopped charging
+            # (battery near 0W means hardware hit target even if our SOC reading lags)
+            if soc >= target or (soc >= target - 1 and abs(battery) < 300):
+                log.info("SOC %.1f%% reached charge target %d%% — stopping (battery=%dW)",
+                         soc, target, battery)
+                self._stop_sync(reason=f"SOC target {target}% reached")
+
+        if not self.state.dispatch_charging:
+            if soc <= target or (soc <= target + 1 and abs(battery) < 300):
+                log.info("SOC %.1f%% reached discharge floor %d%% — stopping (battery=%dW)",
+                         soc, target, battery)
+                self._stop_sync(reason=f"SOC floor {target}% reached")
 
     # --- Dispatch control (all run in executor, all hold lock) ---
 
