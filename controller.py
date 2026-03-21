@@ -296,13 +296,13 @@ class InverterController:
                  "charge" if charge else "discharge", power_w, target_soc, duration_s,
                  power_reg, soc_reg)
 
-        # Write sequence with verified readback
+        # Write config registers FIRST, enable dispatch LAST
         writes = [
-            (0x0880, [1], "dispatch_start"),
             (0x0881, [power_high, power_low], "power"),
             (0x0887, [duration_high, duration_low], "duration"),
             (0x0886, [soc_reg], "soc_target"),
             (0x0885, [DISPATCH_MODE_SOC_CONTROL], "mode"),
+            (0x0880, [1], "dispatch_start"),  # MUST be last
         ]
 
         for addr, values, name in writes:
@@ -361,6 +361,20 @@ class HAPusher:
 
     async def push(self, state: InverterState):
         session = await self._get_session()
+
+        # If disconnected, mark all sensors unavailable so HA alerts fire
+        if not state.connected:
+            for entity_id in self.sensor_map.values():
+                if entity_id is None:
+                    continue
+                try:
+                    url = f"{self.ha_url}/api/states/{entity_id}"
+                    payload = {"state": "unavailable", "attributes": {"friendly_name": entity_id.replace("sensor.", "").replace("_", " ").title()}}
+                    async with session.post(url, json=payload, headers=self.headers, timeout=5) as resp:
+                        pass
+                except Exception:
+                    pass
+            return
 
         sensors = [
             (self.sensor_map.get("battery_soc"), state.soc, "%", "battery", "measurement"),
