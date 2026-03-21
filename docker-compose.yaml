@@ -1,0 +1,15 @@
+services:
+  alphaess-controller:
+    build: .
+    container_name: alphaess-controller
+    restart: unless-stopped
+    ports:
+      - "8214:8214"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    network_mode: host
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
