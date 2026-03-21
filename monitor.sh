@@ -4,12 +4,19 @@
 
 cd /home/david/HomeAssistant
 
+# Read secrets from config.yaml (gitignored)
+CONFIG="/home/david/alphaess-modbus-controller/config.yaml"
+HA_TOKEN=$(python3 -c "import yaml; print(yaml.safe_load(open('$CONFIG'))['homeassistant']['token'])")
+HA_URL=$(python3 -c "import yaml; print(yaml.safe_load(open('$CONFIG'))['homeassistant']['url'])")
+DISCORD_WEBHOOK=$(python3 -c "import yaml; print(yaml.safe_load(open('$CONFIG'))['discord']['webhook'])")
+CONTROLLER_URL=$(python3 -c "import yaml; c=yaml.safe_load(open('$CONFIG')); print(f'http://localhost:{c[\"server\"][\"port\"]}')")
+
 # Collect all state upfront (no tool use needed by Claude)
-STATUS=$(curl -s http://localhost:8214/status 2>/dev/null)
-RATE=$(curl -s -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJmYzJkMGMwY2Q2ODg0NmU0YmNkYzY2M2ZmNjk4ODdlYSIsImlhdCI6MTc3MjM2NzgyNiwiZXhwIjoyMDg3NzI3ODI2fQ.XmoHGYnYZ9VO9ww-Z_1lyWHg-IuQBRtX0VqCWKlBfr8" \
-    http://192.168.1.83:8123/api/states/sensor.octopus_energy_electricity_23j0257374_1610004326540_current_rate 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['state'])" 2>/dev/null)
-TARGET=$(curl -s -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJmYzJkMGMwY2Q2ODg0NmU0YmNkYzY2M2ZmNjk4ODdlYSIsImlhdCI6MTc3MjM2NzgyNiwiZXhwIjoyMDg3NzI3ODI2fQ.XmoHGYnYZ9VO9ww-Z_1lyWHg-IuQBRtX0VqCWKlBfr8" \
-    http://192.168.1.83:8123/api/states/input_number.alphaess_target_soc 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['state'])" 2>/dev/null)
+STATUS=$(curl -s ${CONTROLLER_URL}/status 2>/dev/null)
+RATE=$(curl -s -H "Authorization: Bearer ${HA_TOKEN}" \
+    "${HA_URL}/api/states/sensor.octopus_energy_electricity_23j0257374_1610004326540_current_rate" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['state'])" 2>/dev/null)
+TARGET=$(curl -s -H "Authorization: Bearer ${HA_TOKEN}" \
+    "${HA_URL}/api/states/input_number.alphaess_target_soc" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['state'])" 2>/dev/null)
 NOW=$(date '+%H:%M')
 
 # Ask Claude to analyse (no tools needed — all data in the prompt)
@@ -38,7 +45,7 @@ Keep it to 2-3 lines max. Output NOTHING else — no reasoning, no markdown form
 
 # Send to Discord
 if [ -n "$RESULT" ]; then
-    curl -s -X POST "REDACTED_WEBHOOK" \
+    curl -s -X POST "${DISCORD_WEBHOOK}" \
         -H "Content-Type: application/json" \
         -d "{\"content\": $(echo "$RESULT" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))')}" > /dev/null
 fi

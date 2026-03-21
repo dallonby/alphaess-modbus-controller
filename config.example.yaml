@@ -14,6 +14,9 @@ server:
   host: 0.0.0.0
   port: 8214
 
+discord:
+  webhook: YOUR_DISCORD_WEBHOOK_URL
+
 # Sensor entities pushed to HA via REST API
 sensors:
   battery_soc: sensor.alphaess_battery_soc
