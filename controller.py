@@ -135,8 +135,14 @@ class InverterController:
             self._close()
             return None
 
-    def _write_and_verify(self, addr: int, values: list[int]) -> bool:
-        """Write registers using FC16, then read back to confirm."""
+    def _write_and_verify(self, addr: int, values: list[int], strict: bool = True) -> bool:
+        """Write registers using FC16, then read back to confirm.
+
+        Args:
+            strict: If True, readback must match exactly. If False, log a
+                    warning on mismatch but still return True (inverter may
+                    clamp/round some values like duration).
+        """
         if self._client is None:
             return False
         try:
@@ -150,12 +156,16 @@ class InverterController:
             readback = self._client.read_holding_registers(addr, count=len(values), device_id=self.slave_id)
             if readback.isError():
                 log.warning("Write 0x%04x: write OK but readback failed: %s", addr, readback)
-                return False
+                return not strict
 
             if list(readback.registers) != values:
-                log.warning("Write 0x%04x: VERIFICATION FAILED — wrote %s, read %s",
-                            addr, values, list(readback.registers))
-                return False
+                if strict:
+                    log.warning("Write 0x%04x: VERIFICATION FAILED — wrote %s, read %s",
+                                addr, values, list(readback.registers))
+                    return False
+                else:
+                    log.info("Write 0x%04x: value adjusted by inverter — wrote %s, read %s",
+                             addr, values, list(readback.registers))
 
             return True
         except Exception as e:
@@ -296,19 +306,20 @@ class InverterController:
                  "charge" if charge else "discharge", power_w, target_soc, duration_s,
                  power_reg, soc_reg)
 
-        # Write config registers FIRST, enable dispatch LAST
+        # Dispatch start FIRST — inverter only accepts config writes when
+        # dispatch is active. Matches Alpha2MQTT sequence.
+        # (addr, values, name, strict_verify)
         writes = [
-            (0x0881, [power_high, power_low], "power"),
-            (0x0887, [duration_high, duration_low], "duration"),
-            (0x0886, [soc_reg], "soc_target"),
-            (0x0885, [DISPATCH_MODE_SOC_CONTROL], "mode"),
-            (0x0880, [1], "dispatch_start"),  # MUST be last
+            (0x0880, [1], "dispatch_start", True),
+            (0x0881, [power_high, power_low], "power", False),  # may read back stale until applied
+            (0x0887, [duration_high, duration_low], "duration", False),  # inverter may clamp
+            (0x0886, [soc_reg], "soc_target", False),  # may read back stale
+            (0x0885, [DISPATCH_MODE_SOC_CONTROL], "mode", False),  # triggers application of above
         ]
 
-        for addr, values, name in writes:
-            if not self._write_and_verify(addr, values):
+        for addr, values, name, strict in writes:
+            if not self._write_and_verify(addr, values, strict=strict):
                 log.error("Dispatch write %s (0x%04x) failed — rolling back", name, addr)
-                # Rollback: stop dispatch
                 self._write_and_verify(0x0880, [0])
                 return False
             time.sleep(0.3)
