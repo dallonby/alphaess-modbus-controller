@@ -13,7 +13,7 @@ DISCORD_WEBHOOK=$(python3 -c "import yaml; print(yaml.safe_load(open('$CONFIG'))
 CONTROLLER_URL=$(python3 -c "import yaml; c=yaml.safe_load(open('$CONFIG')); print(f'http://localhost:{c[\"server\"][\"port\"]}')")
 
 # Collect all state upfront (no tool use needed by Claude)
-STATUS=$(curl -s ${CONTROLLER_URL}/status 2>/dev/null)
+STATUS=$(curl -s ${CONTROLLER_URL}/report 2>/dev/null)
 RATE=$(curl -s -H "Authorization: Bearer ${HA_TOKEN}" \
     "${HA_URL}/api/states/sensor.octopus_energy_electricity_23j0257374_1610004326540_current_rate" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['state'])" 2>/dev/null)
 TARGET=$(curl -s -H "Authorization: Bearer ${HA_TOKEN}" \
@@ -31,7 +31,7 @@ Target SOC: ${TARGET}%
 Rules:
 - Off-peak is 23:30-05:30 (rate ~0.07). During off-peak: should be charging toward target or holding at target.
 - Peak rate is ~0.298. During peak: battery should discharge to house, grid near 0, no dispatch active unless rate is cheap.
-- Battery power: POSITIVE = discharging to house (good during peak), NEGATIVE = charging from grid/solar. Do not get this wrong.
+- The controller report above uses unambiguous terms: CHARGING, DISCHARGING, IDLE, HOLDING etc. Trust these descriptions.
 - If dispatch is active during peak rate and battery is charging, that is CRITICAL.
 - SOC below 20% at any time is concerning.
 - Controller connected should be true.

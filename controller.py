@@ -462,6 +462,7 @@ class APIServer:
         self.controller = controller
         self.app = web.Application()
         self.app.router.add_get("/status", self.handle_status)
+        self.app.router.add_get("/report", self.handle_report)
         self.app.router.add_get("/health", self.handle_health)
         self.app.router.add_post("/charge", self.handle_charge)
         self.app.router.add_post("/discharge", self.handle_discharge)
@@ -485,6 +486,57 @@ class APIServer:
             "connected": s.connected,
             "last_update": s.last_update,
         })
+
+    async def handle_report(self, request):
+        """Human/AI-readable status report with unambiguous descriptions."""
+        s = self.controller.state
+
+        # Battery state
+        bat = s.battery_power
+        if bat < -200:
+            battery_state = f"CHARGING from grid at {abs(bat)/1000:.1f}kW"
+        elif bat > 200:
+            battery_state = f"DISCHARGING to house at {bat/1000:.1f}kW"
+        else:
+            battery_state = "IDLE (0kW)"
+
+        # Grid state
+        grid = s.grid_power
+        if grid > 200:
+            grid_state = f"IMPORTING {grid/1000:.1f}kW from grid (house/charge drawing from mains)"
+        elif grid < -200:
+            grid_state = f"EXPORTING {abs(grid)/1000:.1f}kW to grid"
+        else:
+            grid_state = "ZERO (house fully powered by battery/solar)"
+
+        # Dispatch state
+        if s.dispatch_holding:
+            dispatch_state = f"HOLDING at {s.soc:.0f}% — battery idle, house running from grid"
+        elif s.dispatch_active and s.dispatch_charging:
+            dispatch_state = f"CHARGE DISPATCH active — charging to {s.dispatch_soc_target}% at {abs(s.dispatch_power_w)/1000:.0f}kW, {s.dispatch_time_remaining/60:.0f}min remaining"
+        elif s.dispatch_active and not s.dispatch_charging:
+            dispatch_state = f"DISCHARGE DISPATCH active — discharging to {s.dispatch_soc_target}%, {s.dispatch_time_remaining/60:.0f}min remaining"
+        else:
+            dispatch_state = "INACTIVE — inverter in normal mode (battery discharges to power house)"
+
+        # Solar
+        if s.pv_power > 100:
+            solar_state = f"GENERATING {s.pv_power/1000:.1f}kW (PV1: {s.pv1_power:.0f}W, PV2: {s.pv2_power:.0f}W)"
+        else:
+            solar_state = "NO GENERATION (night or overcast)"
+
+        report = {
+            "battery_soc_percent": round(s.soc, 1),
+            "battery_state": battery_state,
+            "grid_state": grid_state,
+            "solar_state": solar_state,
+            "house_load_kw": round(s.load_power / 1000, 1),
+            "dispatch_state": dispatch_state,
+            "dispatch_soc_target_percent": s.dispatch_soc_target,
+            "modbus_connected": s.connected,
+            "last_update_seconds_ago": round(time.time() - s.last_update, 0),
+        }
+        return web.json_response(report)
 
     async def handle_health(self, request):
         s = self.controller.state
