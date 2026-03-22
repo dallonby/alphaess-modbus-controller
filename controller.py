@@ -253,12 +253,19 @@ class InverterController:
         battery = self.state.battery_power
 
         if self.state.dispatch_charging:
-            # Stop if SOC at/above target, OR if inverter has stopped charging
-            # (battery near 0W means hardware hit target even if our SOC reading lags)
+            # Switch to hold when SOC reaches target — keeps battery idle,
+            # house runs from grid (important during off-peak cheap rate)
             if soc >= target or (soc >= target - 1 and abs(battery) < 300):
-                log.info("SOC %.1f%% reached charge target %d%% — stopping (battery=%dW)",
+                log.info("SOC %.1f%% reached charge target %d%% — switching to hold (battery=%dW)",
                          soc, target, battery)
-                self._stop_sync(reason=f"SOC target {target}% reached")
+                current_soc = int(soc)
+                ok = self._dispatch_sync(8000, current_soc, self.state.dispatch_duration, True)
+                if ok:
+                    self.state.dispatch_holding = True
+                    log.info("Switched to hold at %d%%", current_soc)
+                else:
+                    log.warning("Hold switch failed, stopping dispatch instead")
+                    self._stop_sync(reason=f"SOC target {target}% reached, hold failed")
 
         if not self.state.dispatch_charging:
             if soc <= target or (soc <= target + 1 and abs(battery) < 300):
