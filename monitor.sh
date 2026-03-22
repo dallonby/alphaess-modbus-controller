@@ -31,7 +31,7 @@ Target SOC: ${TARGET}%
 Rules:
 - Off-peak is 23:30-05:30 (rate ~0.07). During off-peak: should be charging toward target or holding at target.
 - Peak rate is ~0.298. During peak: battery should discharge to house, grid near 0, no dispatch active unless rate is cheap.
-- Battery power: positive = discharging (good during peak), negative = charging.
+- Battery power: POSITIVE = discharging to house (good during peak), NEGATIVE = charging from grid/solar. Do not get this wrong.
 - If dispatch is active during peak rate and battery is charging, that is CRITICAL.
 - SOC below 20% at any time is concerning.
 - Controller connected should be true.
