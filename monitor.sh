@@ -2,6 +2,7 @@
 # Hourly energy system monitor — collects system state, asks Claude to
 # analyse it, sends the result to Discord.
 
+export PATH="$HOME/.local/bin:$PATH"
 cd /home/david/HomeAssistant
 
 # Read secrets from config.yaml (gitignored)
