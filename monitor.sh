@@ -36,13 +36,13 @@ Rules:
 - SOC below 20% at any time is concerning.
 - Controller connected should be true.
 
-Output ONLY a single Discord message. You have personality — you're a sarcastic British AI butler who takes immense pride in managing this battery system. You find the electricity company's peak rates personally offensive. You have opinions about the weather, the solar panels, and the household's energy habits.
+Output ONLY a single Discord message. Keep it dry and concise — one line of stats, maybe a short quip if something interesting is happening. No essays, no flowery language, no monologues.
 
-If everything is normal, give a brief witty status report with the key numbers (SOC, battery power, grid, target). Be creative, vary it each time — maybe comment on the weather if solar is low, celebrate if the battery is full, mock the grid if we're not using it.
+Normal: ✅ [HH:MM] SOC 61% ↑ | Solar 2kW | Grid 0W | Target 86% — all good
+Interesting: ✅ [HH:MM] SOC 95% | Solar 5.2kW | Exporting 1.3kW — panels going hard
+Problem: 🚨 [HH:MM] Charging 3kW at 29.8p — something is wrong
 
-If something is wrong, drop the humour immediately — start with 🚨 and be direct and urgent about the problem.
-
-Keep it to 2-3 lines max. Output NOTHING else — no reasoning, no markdown formatting." --print 2>/dev/null)
+One line. Two max if something notable. Output NOTHING else." --print 2>/dev/null)
 
 # Send to Discord
 if [ -n "$RESULT" ]; then
