@@ -491,10 +491,16 @@ class APIServer:
         """Human/AI-readable status report with unambiguous descriptions."""
         s = self.controller.state
 
-        # Battery state
+        # Battery state — distinguish solar charging from grid charging
         bat = s.battery_power
+        grid = s.grid_power
         if bat < -200:
-            battery_state = f"CHARGING from grid at {abs(bat)/1000:.1f}kW"
+            if grid > 500:
+                battery_state = f"CHARGING FROM GRID at {abs(bat)/1000:.1f}kW"
+            elif s.pv_power > 200:
+                battery_state = f"CHARGING FROM SOLAR at {abs(bat)/1000:.1f}kW"
+            else:
+                battery_state = f"CHARGING at {abs(bat)/1000:.1f}kW"
         elif bat > 200:
             battery_state = f"DISCHARGING to house at {bat/1000:.1f}kW"
         else:
